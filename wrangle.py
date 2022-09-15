@@ -27,7 +27,7 @@ def new_zillow_db():
     p.taxamount, p.taxdelinquencyflag, p.taxdelinquencyyear, p.censustractandblock
 
     FROM properties_2017 as p
-    RIGHT JOIN predictions_2017 as pd
+    INNER JOIN predictions_2017 as pd
     ON p.id = pd.id
     LEFT JOIN airconditioningtype as ac
     ON p.airconditioningtypeid = ac.airconditioningtypeid
@@ -47,6 +47,7 @@ def new_zillow_db():
     ON p.parcelid = u.parcelid
     WHERE p.latitude IS NOT NULL
     AND p.longitude IS NOT NULL
+    AND p.propertylandusetypeid = 261
 
     ;''', get_connection('zillow'))
     return zillow
@@ -74,46 +75,8 @@ def wrangle_zillow():
         # Read fresh data from db into a DataFrame
         df = new_zillow_db()
         # Cache data
-        df.to_csv('zillow_project.csv')
-    # change bedroom count to an integer
-    df.bedroomcnt = df.bedroomcnt.astype(int)
-    # change year built to an integer
-    df.yearbuilt = df.yearbuilt.astype(int)
-    # change fips to an integer
-    df.fips = df.fips.astype(int)
-    # rename columns for readability
-    df = df.rename(columns={'bedroomcnt': 'bedrooms', 'bathroomcnt': 'bathrooms', 'calculatedfinishedsquarefeet': 'sqft', 
-                        'taxvaluedollarcnt': 'tax_value', 'yearbuilt': 'year','lotsizesquarefeet':'lot_size', 
-                        'regionidzip':'zipcode'})
-    # remove rows with 6 or more bedrooms
-    df = df[df['bedrooms'] < 6]
-    # remove rows with 5 or more bathrooms
-    df = df[df['bathrooms'] < 5]
-    # remove rows with values less than or equal to 700 square feet
-    df = df[df.sqft > 700]
-    # remove rows with values greater than or equal to 11_000 square feet
-    df = df[df.sqft < 11000]
-    # remove rows with tax values greater than or equal to 700000
-    df = df[df.tax_value < 700000]
-    # remove rows with tax values less than or equal to 10000
-    df = df[df.tax_value > 100000]
-    # remove rows with a year less than or equal to 1899
-    df = df[df.year > 1899]
-    # remove rows with lot size less than 12000 square feet
-    df = df[df.lot_size < 12000]
-    # remove rows with lot size greater than 1000 square feet 
-    df = df[df.lot_size > 1000]
-    df.fips = df.fips.astype(str)
-    # create dummies for the 'day' and 'time' columns
-    dummy_df = pd.get_dummies(df[['fips']], dummy_na=False)
-    # concatenate the dummy columns and the original dataframe
-    df = pd.concat([df, dummy_df], axis=1)
-    # create a new column for the total number of bedrooms and bathrooms
-    df['bed_bath'] = df.bathrooms + df.bedrooms
-    # convert fips to an integer
-    df.fips = df.fips.astype(int)
-    # create a new column for the difference between lot size and home size
-    df['lot_minus_home'] = df.lot_size - df.sqft
+        df.to_csv('zillow.csv')
+    
     return df
 
 def split_data(df):
@@ -195,3 +158,80 @@ def robust_scaler(a,b,c):
     X_test_robust = pd.DataFrame(scaler.transform(c))
     # return the scaled data for each renamed variable
     return X_train_robust, X_validate_robust, X_test_robust
+
+def nulls_by_row(df):
+    num_missing = df.isnull().sum(axis=1)
+    prnt_miss = num_missing / df.shape[1] * 100
+    rows_missing = pd.DataFrame({'num_cols_missing': num_missing, 'percent_cols_missing': prnt_miss}).\
+    reset_index().groupby(['num_cols_missing', 'percent_cols_missing']).count().\
+    reset_index().rename(columns={'customer_id': 'count'})
+    return rows_missing
+
+def nulls_by_col(df):
+    num_missing = df.isnull().sum()
+    prnt_miss = num_missing / df.shape[0] * 100
+    cols_missing = pd.DataFrame({'num_rows_missing': num_missing, 'percent_rows_missing': prnt_miss}).\
+    reset_index().groupby(['num_rows_missing', 'percent_rows_missing']).count().reset_index().\
+    rename(columns={'index': 'count'})
+    return cols_missing
+
+def summarize(df):
+    print('DataFrame head: \n')
+    print(df.head())
+    print('----------')
+    print('DataFrame info: \n')
+    print(df.info())
+    print('----------')
+    print('DataFrame description: \n')
+    print(df.describe())
+    print('----------')
+    print('Null value assessments: \n')
+    print('Nulls by column: ', nulls_by_col(df))
+    print('----------')
+    print('Nulls by row: ', nulls_by_row(df))
+    numerical_cols = [col for col in df.columns if df[col].dtypes != 'O']
+    cat_cols = [col for col in df.columns if col not in numerical_cols]
+    print('----------')
+    print('Value counts: \n')
+    for col in df.columns:
+        if col in cat_cols:
+            print(df[col].value_counts())
+        else:
+            print(df[col].value_counts(bins=10, sort=False))
+        print('-----')
+    print('----------')
+    print('Report Finished')
+
+def get_upper_outliers(s, k=1.5):
+    q1, q3 = s.quantile([0.25, 0.75])
+    iqr = q3 - q1
+    upper_bound = q3 + k*iqr
+    return s.apply(lambda x: max([x - upper_bound, 0]))
+
+def add_upper_outlier_columns(df, k=1.5):
+    for col in df.select_dtypes('number'):
+        df[col + '_upper_outliers'] = get_upper_outliers(df[col], k)
+    return df
+
+def remove_columns(df, cols_to_remove):  
+    df = df.drop(columns=cols_to_remove)
+    return df
+
+def handle_missing_values(df, 
+                          prop_required_columns=0.5, 
+                          prop_required_row=0.75):
+    threshold = int(round(prop_required_columns * len(df.index), 0))
+    df = df.dropna(axis=1, thresh=threshold)
+    threshold = int(round(prop_required_row * len(df.columns), 0))
+    df = df.dropna(axis=0, thresh=threshold)
+    return df
+
+def split_data_strat(df, column):
+    '''This function takes in two arguments, a dataframe and a string. The string argument is the name of the
+        column that will be used to stratify the train_test_split. The function returns three dataframes, a 
+        training dataframe with 60 percent of the data, a validate dataframe with 20 percent of the data and test
+        dataframe with 20 percent of the data.'''
+    train, test = train_test_split(df, test_size=.2, random_state=217, stratify=df[column])
+    train, validate = train_test_split(train, test_size=.25, random_state=217, stratify=train[column])
+    return train, validate, test
+
